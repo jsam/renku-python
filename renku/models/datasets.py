@@ -137,6 +137,15 @@ class DatasetFile(object):
         """Define default value for datetime fields."""
         return datetime.datetime.utcnow()
 
+    @property
+    def file(self):
+        return self.path.name
+
+    @property
+    def authors_csv(self):
+        """Comma-separated list of authors associated with dataset."""
+        return ",".join(author.name for author in self.authors)
+
 
 _deserialize_files = partial(_deserialize_dict, cls=DatasetFile)
 
@@ -205,3 +214,9 @@ class Dataset(object):
             files[key] = attr.evolve(file, path=key)
 
         return attr.evolve(self, files=files)
+
+    def remove_file(self, file_to_remove):
+        """Removes a file from dataset files container."""
+        for key, dataset_file in attr.evolve(self).files.items():
+            if dataset_file.file == file_to_remove.file:
+                self.files.pop(key)

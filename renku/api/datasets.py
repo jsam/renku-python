@@ -16,7 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Client for handling datasets."""
-
 import os
 import shutil
 import stat
@@ -31,6 +30,7 @@ import yaml
 
 from renku import errors
 from renku._compat import Path
+from renku.errors import ResourceNotFound, DatasetNotEmpty
 from renku.models._git import GitURL
 from renku.models._jsonld import asjsonld
 from renku.models.datasets import Author, Dataset, DatasetFile, NoneType
@@ -81,6 +81,8 @@ class DatasetsApiMixin(object):
                     with path.open('r') as f:
                         source = yaml.load(f) or {}
                     dataset = Dataset.from_jsonld(source)
+                    for dataset_file in dataset.files.values():
+                        dataset_file.dataset = dataset.name
 
             if dataset is None:
                 source = {}
@@ -101,7 +103,6 @@ class DatasetsApiMixin(object):
             dataset_path.mkdir(parents=True, exist_ok=True)
 
             yield dataset
-
             source.update(**asjsonld(dataset))
 
             # TODO
@@ -110,8 +111,36 @@ class DatasetsApiMixin(object):
             #     if path.exists():
             #         raise ValueError('Dataset already exists')
 
-            with path.open('w') as f:
-                yaml.dump(source, f, default_flow_style=False)
+            if path is not None and path.parent.exists():
+                with path.open('w') as f:
+                    yaml.dump(source, f, default_flow_style=False)
+
+    def delete_dataset(self, dataset, force=False):
+        """Deletes empty dataset.
+
+        If force flag is True, it deletes all data from dataset.
+        Raises `DatasetNotEmpty` if dataset is not empty
+        and --force flag is not used.
+        """
+        if not force and dataset.files:
+            raise DatasetNotEmpty()
+
+        dataset_dir_path = self.renku_datasets_path / dataset.identifier.hex
+        meta_file = dataset_dir_path / self.METADATA
+        meta_file.unlink()
+
+    def files_to_unlink(self, dataset, pattern):
+        """Checks which files match pattern."""
+
+        dataset_path = self.path / self.datadir / dataset.name
+        files = [
+            str(file) for file in dataset_path.rglob(pattern) if file.is_file()
+        ]
+
+        if not files:
+            raise ResourceNotFound(resource_type='DatasetFile')
+
+        return files
 
     def add_data_to_dataset(
         self, dataset, url, git=False, force=False, **kwargs
@@ -250,7 +279,6 @@ class DatasetsApiMixin(object):
 
         # Respect the directory struture inside the source path.
         relative_to = kwargs.get('relative_to', None)
-
         if u.scheme in ('', 'file'):
             warnings.warn('Importing local git repository, use HTTPS')
             # determine where is the base repo path
