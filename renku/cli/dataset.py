@@ -151,10 +151,21 @@ Unlink all files from a dataset:
 .. note:: The ``unlink`` command does not delete files,
     only the dataset record.
 """
+import tempfile
+from collections import OrderedDict
 
+import multiprocessing as mp
+from urllib.parse import urlparse
+
+import idutils
+from tqdm import tqdm
 import click
+import requests
 from click import BadParameter
 
+from renku.cli.zenodo import Zenodo
+from renku.models._tabulate import tabulate
+from .._compat import Path
 from ._client import pass_local_client
 from ._echo import WARNING, progressbar
 from ._format.dataset_files import FORMATS as DATASET_FILES_FORMATS
@@ -360,6 +371,84 @@ def remove(client, names):
                 ref.delete()
 
     click.secho('OK', fg='green')
+
+
+@dataset.command('import')
+@click.argument('uri')
+@click.pass_context
+def import_(ctx, uri):
+    """Import data from 3rd party provider."""
+    is_doi = idutils.is_doi(uri)
+    is_url = idutils.is_url(uri)
+    if is_doi is False and is_url is False:
+        raise BadParameter(
+            'Could not process {0}.\nValid formats are: DOI, URL'.format(uri)
+        )
+
+    provider = None
+    record = None
+    if 'zenodo' in uri:
+        provider = Zenodo()
+
+    if is_doi:
+        uri = idutils.normalize_doi(uri)
+        record = provider.find_record_by_doi(uri)
+
+    if is_url:
+        record_id = urlparse(uri).path.split('/')[-1]
+        record = provider.get_record(record_id)
+
+    files_ = record.get_files()
+    click.echo(
+        tabulate(
+            files_,
+            headers=OrderedDict((
+                ('checksum', None),
+                ('key', 'filename'),
+                ('size', None),
+                ('type', None),
+            ))
+        )
+    )
+
+    if files_ and click.confirm('Do you wish to download?'):
+        data_folder = tempfile.mkdtemp()
+        name = record.data['metadata']['title']\
+            .replace(' ', '_')\
+            .replace(':', '')\
+            .lower()
+
+        # TODO: fix when you have more files than cores
+        pool = mp.Pool(mp.cpu_count())
+        processing = [
+            pool.apply_async(download_file, args=(i, data_folder, file_, ))
+            for i, file_ in enumerate(files_)
+        ]
+        for p in processing:
+            p.wait()
+        pool.close()
+
+        ctx.invoke(add, name=name, urls=[data_folder])
+        click.secho('OK', fg='green')
+
+
+def download_file(position, data_folder, file, chunk_size=8192):
+    """Download file with progress tracking."""
+    url = file.links['self']
+    local_filename = url.split('/')[-1]
+
+    def stream_to_file(request):
+        """Stream bytes to file."""
+        with open(data_folder / Path(local_filename), 'wb') as f_:
+            with tqdm(total=file.size, position=position) as progressbar_:
+                for chunk in request.iter_content(chunk_size=chunk_size):
+                    if chunk:  # remove keep-alive chunks
+                        f_.write(chunk)
+                        progressbar_.update(chunk_size)
+
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        stream_to_file(r)
 
 
 def _include_exclude(file_path, include=None, exclude=None):
